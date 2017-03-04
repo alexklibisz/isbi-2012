@@ -36,16 +36,18 @@ class UNet():
             'input_shape': (128, 128, 1),       # Row dimension has to be a power of 2.
             'output_shape': (128, 128, 1),
             'transform_train': False,
-            'prop_trn': 1.0,
-            'prop_val': 0.0,
-            'batch_size': 5,
+            'prop_trn': 22. / 30.,
+            'prop_val': 8. / 30.,
+            'batch_size': 2,
             'nb_epoch': 25,
             'seed': 865
         }
 
         self.net = None
-        self.imgs = None
-        self.msks = None
+        self.imgs_trn = None
+        self.msks_trn = None
+        self.imgs_val = None
+        self.msks_val = None
         self.imgs_mean = None
         self.imgs_std = None
         self.history = None
@@ -61,13 +63,18 @@ class UNet():
         logger = logging.getLogger(funcname())
 
         logger.info('Reading images from %s.' % self.config['data_path'])
-        self.imgs = tiff.imread('%s/train-volume.tif' % self.config['data_path'])
-        self.msks = tiff.imread('%s/train-labels.tif' % self.config['data_path'])
+        imgs = tiff.imread('%s/train-volume.tif' % self.config['data_path'])
+        msks = tiff.imread('%s/train-labels.tif' % self.config['data_path'])
 
-        logger.info('Images: %s, labeld: %s' % (str(self.imgs.shape), str(self.msks.shape)))
+        nb_trn = int(len(imgs) * self.config['prop_trn'])
+        nb_val = int(len(imgs) * self.config['prop_val'])
+        self.imgs_trn, self.msks_trn = imgs[:nb_trn], msks[:nb_trn]
+        self.imgs_val, self.msks_val = imgs[-nb_val:], msks[-nb_val:]
 
-        self.imgs_mean = np.mean(self.imgs)
-        self.imgs_std = np.std(self.imgs)
+        logger.info('Images: %s, labeld: %s' % (str(self.imgs_trn.shape), str(self.msks_trn.shape)))
+
+        self.imgs_mean = np.mean(self.imgs_trn)
+        self.imgs_std = np.std(self.imgs_trn)
 
         logger.info('Images mean: %.2lf, std: %.2lf' % (self.imgs_mean, self.imgs_std))
 
@@ -84,20 +91,22 @@ class UNet():
         Y_batch = np.empty((batch_size,) + self.config['output_shape'])
         batch_idx = 0
 
-        combined = [(img, msk) for img, msk in zip(imgs, msks)]
+        combined = []
+        for img, msk in zip(imgs,msks):
+            img = (img - self.imgs_mean) / self.imgs_std
+            img = resize(img, self.config['input_shape'][:2])
+            msk = resize(msk, self.config['output_shape'][:2])
+            combined.append((img,msk))
 
         while True:
 
             for img, msk in combined:
-                _img = (img - self.imgs_mean) / self.imgs_std
-                _img = resize(_img, output_shape=self.config['input_shape'][:2])
-                _msk = resize(msk, output_shape=self.config['output_shape'][:2])
 
                 if transform:
-                    [_img, _msk] = random_transforms([_img, _msk])
+                    [img, msk] = random_transforms([img.copy(), msk.copy()])
 
-                X_batch[batch_idx] = _img.reshape(self.config['input_shape'])
-                Y_batch[batch_idx] = _msk.reshape(self.config['output_shape'])
+                X_batch[batch_idx] = img.reshape(self.config['input_shape'])
+                Y_batch[batch_idx] = msk.reshape(self.config['output_shape'])
                 batch_idx += 1
                 if batch_idx == batch_size:
                     batch_idx = 0
@@ -199,8 +208,11 @@ class UNet():
 
         logger = logging.getLogger(funcname())
 
-        gen_trn = self.batch_gen(imgs=self.imgs, msks=self.msks, batch_size=self.config['batch_size'], \
+        gen_trn = self.batch_gen(imgs=self.imgs_trn, msks=self.msks_trn, batch_size=self.config['batch_size'], \
                                  shuffle=True, infinite=True, transform=self.config['transform_train'])
+
+        gen_val = self.batch_gen(imgs=self.imgs_val, msks=self.msks_val, batch_size=self.config['batch_size'],
+                                 infinite=True)
 
         callbacks = []
 
@@ -217,14 +229,16 @@ class UNet():
             history_plot_cb.file_name = self.checkpoint_name + '.history.png'
             callbacks.append(history_plot_cb)
 
-        logger.info('Training for %d epochs with %d train.' % (self.config['nb_epoch'], len(self.imgs)))
+        logger.info('Training for %d epochs with %d train.' % (self.config['nb_epoch'], len(self.imgs_trn)))
 
         random.seed(self.config['seed'])
 
         result = self.net.fit_generator(
             nb_epoch=self.config['nb_epoch'],
-            samples_per_epoch=len(self.imgs) * (2 if self.config['transform_train'] else 1),
+            samples_per_epoch=len(self.imgs_trn) * (2 if self.config['transform_train'] else 1),
             generator=gen_trn,
+            nb_val_samples=len(self.imgs_val),
+            validation_data=gen_val,
             initial_epoch=0,
             callbacks=callbacks,
             class_weight='auto',
