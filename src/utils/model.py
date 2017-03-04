@@ -105,8 +105,12 @@ class KerasHistoryPlotCallback(Callback):
         self.logs = {}
 
     def on_epoch_end(self, epoch, logs={}):
+
+        if hasattr(self, 'file_name'):
+            import matplotlib
+            matplotlib.use('agg')
+
         import matplotlib.pyplot as plt
-        import seaborn
 
         if len(self.logs) == 0:
             self.logs = {key:[] for key in logs.keys()}
@@ -131,9 +135,14 @@ class KerasHistoryPlotCallback(Callback):
             if val_key in self.logs:
                 ax.plot(self.logs[val_key], label='VL')
             ax.legend()
+
         plt.suptitle('Epoch %d: %s' % (epoch, ctime()), y=1.10)
         plt.tight_layout(pad=0.8, w_pad=0.8, h_pad=1.0)
-        plt.show()
+
+        if hasattr(self, 'file_name'):
+            plt.savefig(self.file_name)
+        else:
+            plt.show()
 
 class KerasSimpleLoggerCallback(Callback):
 

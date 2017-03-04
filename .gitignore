@@ -3,4 +3,4 @@ checkpoints/*
 **/*.pyc
 
 !**/.keep
-
+!checkpoints/*.net
