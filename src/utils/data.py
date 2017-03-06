@@ -1,15 +1,17 @@
+from skimage.filters import gaussian
 import numpy as np
 import random
 
-def random_transforms(items, nb_min=0, nb_max=4):
+def random_transforms(items, nb_min=0, nb_max=6):
 
     all_transforms = [
-        lambda x: x,
         lambda x: np.fliplr(x),
         lambda x: np.flipud(x),
         lambda x: np.rot90(x, 1),
         lambda x: np.rot90(x, 2),
-        lambda x: np.rot90(x, 3)
+        lambda x: np.rot90(x, 3),
+        lambda x: gaussian(x, sigma=1),
+        lambda x: gaussian(x, sigma=2),
     ]
 
     n = random.randint(nb_min, nb_max)
