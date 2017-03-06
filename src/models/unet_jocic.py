@@ -38,6 +38,10 @@ class UNet():
             'input_shape': (128, 128, 1),       # Row dimension has to be a power of 2.
             'output_shape': (128, 128, 1),
             'output_shape_onehot': (128, 128, 2),
+            'prop_trn': 24. / 30.,
+            'prop_val': 6. / 30.,
+            'montage_trn_shape': (4,6),
+            'montage_val_shape': (2,3),
             'transform_train': False,
             'batch_size': 64,
             'nb_epoch': 25,
@@ -46,8 +50,10 @@ class UNet():
         }
 
         self.net = None
-        self.imgs_montage = None
-        self.msks_montage = None
+        self.imgs_montage_trn = None
+        self.msks_montage_trn = None
+        self.imgs_montage_val = None
+        self.msks_montage_val = None
         self.history = None
 
         return
@@ -64,23 +70,34 @@ class UNet():
         imgs = tiff.imread('%s/train-volume.tif' % self.config['data_path'])
         msks = tiff.imread('%s/train-labels.tif' % self.config['data_path']).round()
 
-        logger.info('Combining images and masks into montages.')
-
-        nb_row = 5
-        nb_col = int(len(imgs) / nb_row)
-        assert nb_row * nb_col == len(imgs) == len(msks)
-
         H, W = self.config['img_shape']
-        self.imgs_montage = np.empty((nb_row * H, nb_col * W))
-        self.msks_montage = np.empty((nb_row * H, nb_col * W))
 
-        imgs, msks = iter(imgs), iter(msks)
-
+        logger.info('Combining images and masks into montages.')
+        nb_trn = int(len(imgs) * self.config['prop_trn'])
+        imgs_trn, msks_trn = imgs[:nb_trn], msks[:nb_trn]
+        nb_row, nb_col = self.config['montage_trn_shape']
+        assert nb_row * nb_col == len(imgs_trn) == len(msks_trn)
+        self.imgs_montage_trn = np.empty((nb_row * H, nb_col * W))
+        self.msks_montage_trn = np.empty((nb_row * H, nb_col * W))
+        imgs_trn, msks_trn = iter(imgs_trn), iter(msks_trn)
         for y0 in range(0, nb_row * H, H):
             for x0 in range(0, nb_col * W, W):
                 y1, x1 = y0 + H, x0 + W
-                self.imgs_montage[y0:y1,x0:x1] = next(imgs)
-                self.msks_montage[y0:y1,x0:x1] = next(msks)
+                self.imgs_montage_trn[y0:y1, x0:x1] = next(imgs_trn)
+                self.msks_montage_trn[y0:y1, x0:x1] = next(msks_trn)
+
+        logger.info('Combining validation images and masks into montages')
+        imgs_val, msks_val = imgs[nb_trn:], msks[nb_trn:]
+        nb_row, nb_col = self.config['montage_val_shape']
+        assert nb_row * nb_col == len(imgs_val) == len(msks_val)
+        self.imgs_montage_val = np.empty((nb_row * H, nb_col * W))
+        self.msks_montage_val = np.empty((nb_row * H, nb_col * W))
+        imgs_val, msks_val = iter(imgs_val), iter(msks_val)
+        for y0 in range(0, nb_row * H, H):
+            for x0 in range(0, nb_col * W, W):
+                y1, x1 = y0 + H, x0 + W
+                self.imgs_montage_val[y0:y1, x0:x1] = next(imgs_val)
+                self.msks_montage_val[y0:y1, x0:x1] = next(msks_val)
 
         return
 
@@ -111,7 +128,7 @@ class UNet():
             msk_wdw = msks[y0:y1, x0:x1]
 
             if transform:
-                [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw], nb_max=7)
+                [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw])
 
             X_batch[batch_idx] = img_wdw.reshape(self.config['input_shape'])
             Y_batch[batch_idx] = msk_wdw.reshape(self.config['output_shape'])
@@ -130,87 +147,87 @@ class UNet():
         inputs = Input(shape=self.config['input_shape'])
 
         conv1 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(inputs)
-        # conv1 = BatchNormalization(momentum=0.6)(conv1)
+        # conv1 = BatchNormalization(momentum=0.99)(conv1)
         conv1 = Activation('relu')(conv1)
         conv1 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(conv1)
-        # conv1 = BatchNormalization(momentum=0.6)(conv1)
+        # conv1 = BatchNormalization(momentum=0.99)(conv1)
         conv1 = Activation('relu')(conv1)
         # conv1 = Dropout(0.2)(conv1)
         pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
 
         conv2 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(pool1)
-        # conv2 = BatchNormalization(momentum=0.6)(conv2)
+        # conv2 = BatchNormalization(momentum=0.99)(conv2)
         conv2 = Activation('relu')(conv2)
         conv2 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(conv2)
-        # conv2 = BatchNormalization(momentum=0.6)(conv2)
+        # conv2 = BatchNormalization(momentum=0.99)(conv2)
         conv2 = Activation('relu')(conv2)
         # conv2 = Dropout(0.2)(conv2)
         pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
 
         conv3 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(pool2)
-        # conv3 = BatchNormalization(momentum=0.6)(conv3)
+        # conv3 = BatchNormalization(momentum=0.99)(conv3)
         conv3 = Activation('relu')(conv3)
         conv3 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(conv3)
-        # conv3 = BatchNormalization(momentum=0.6)(conv3)
+        # conv3 = BatchNormalization(momentum=0.99)(conv3)
         conv3 = Activation('relu')(conv3)
         # conv3 = Dropout(0.2)(conv3)
         pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
 
         conv4 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(pool3)
-        # conv4 = BatchNormalization(momentum=0.6)(conv4)
+        # conv4 = BatchNormalization(momentum=0.99)(conv4)
         conv4 = Activation('relu')(conv4)
         conv4 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(conv4)
-        # conv4 = BatchNormalization(momentum=0.6)(conv4)
+        # conv4 = BatchNormalization(momentum=0.99)(conv4)
         conv4 = Activation('relu')(conv4)
         # conv4 = Dropout(0.2)(conv4)
         pool4 = MaxPooling2D(pool_size=(2, 2))(conv4)
 
         conv5 = Convolution2D(512, 3, 3, activation='linear', border_mode='same')(pool4)
-        # conv5 = BatchNormalization(momentum=0.6)(conv5)
+        # conv5 = BatchNormalization(momentum=0.99)(conv5)
         conv5 = Activation('relu')(conv5)
         conv5 = Convolution2D(512, 3, 3, activation='linear', border_mode='same')(conv5)
-        # conv5 = BatchNormalization(momentum=0.6)(conv5)
+        # conv5 = BatchNormalization(momentum=0.99)(conv5)
         conv5 = Activation('relu')(conv5)
         # conv5 = Dropout(0.2)(conv5)
 
         up6 = merge([UpSampling2D(size=(2, 2))(conv5), conv4], mode='concat', concat_axis=3)
         conv6 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(up6)
-        # conv6 = BatchNormalization(momentum=0.6)(conv6)
+        # conv6 = BatchNormalization(momentum=0.99)(conv6)
         conv6 = Activation('relu')(conv6)
         conv6 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(conv6)
-        # conv6 = BatchNormalization(momentum=0.6)(conv6)
+        # conv6 = BatchNormalization(momentum=0.99)(conv6)
         conv6 = Activation('relu')(conv6)
         # conv6 = Dropout(0.2)(conv6)
 
         up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3], mode='concat', concat_axis=3)
         conv7 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(up7)
-        # conv7 = BatchNormalization(momentum=0.6)(conv7)
+        # conv7 = BatchNormalization(momentum=0.99)(conv7)
         conv7 = Activation('relu')(conv7)
         conv7 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(conv7)
-        # conv7 = BatchNormalization(momentum=0.6)(conv7)
+        # conv7 = BatchNormalization(momentum=0.99)(conv7)
         conv7 = Activation('relu')(conv7)
         # conv7 = Dropout(0.2)(conv7)
 
         up8 = merge([UpSampling2D(size=(2, 2))(conv7), conv2], mode='concat', concat_axis=3)
         conv8 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(up8)
-        # conv8 = BatchNormalization(momentum=0.6)(conv8)
+        # conv8 = BatchNormalization(momentum=0.99)(conv8)
         conv8 = Activation('relu')(conv8)
         conv8 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(conv8)
-        # conv8 = BatchNormalization(momentum=0.6)(conv8)
+        # conv8 = BatchNormalization(momentum=0.99)(conv8)
         conv8 = Activation('relu')(conv8)
         # conv8 = Dropout(0.2)(conv8)
 
         up9 = merge([UpSampling2D(size=(2, 2))(conv8), conv1], mode='concat', concat_axis=3)
         conv9 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(up9)
-        # conv9 = BatchNormalization(momentum=0.6)(conv9)
+        # conv9 = BatchNormalization(momentum=0.99)(conv9)
         conv9 = Activation('relu')(conv9)
         conv9 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(conv9)
-        # conv9 = BatchNormalization(momentum=0.6)(conv9)
+        # conv9 = BatchNormalization(momentum=0.99)(conv9)
         conv9 = Activation('relu')(conv9)
         # conv9 = Dropout(0.2)(conv9)
 
         conv10 = Convolution2D(2, 1, 1, activation='linear')(conv9)
-        # conv10 = BatchNormalization(momentum=0.6)(conv10)
+        conv10 = BatchNormalization(momentum=0.99)(conv10)
 
         output = Flatten()(conv10)
         H,W,D = self.config['output_shape_onehot']
@@ -226,11 +243,7 @@ class UNet():
         output = Reshape(self.config['output_shape'])(output)
 
         self.net = Model(input=inputs, output=output)
-
-        if self.config['nb_gpu'] > 1:
-            self.net = make_parallel(self.net, gpu_count=self.config['nb_gpu'])
-
-        self.net.compile(optimizer=Adam(lr=1e-4), loss='binary_crossentropy',
+        self.net.compile(optimizer=Adam(), loss='binary_crossentropy',
                          metrics=['fmeasure', 'precision', 'recall', dice_coef])
 
         return
@@ -239,9 +252,10 @@ class UNet():
 
         logger = logging.getLogger(funcname())
 
-        gen_trn = cycle(self.batch_gen(imgs=self.msks_montage, msks=self.msks_montage, batch_size=self.config['batch_size'],
-                                       transform=self.config['transform_train']))
-        gen_val = cycle(self.batch_gen(imgs=self.msks_montage, msks=self.msks_montage, batch_size=self.config['batch_size']))
+        gen_trn = cycle(self.batch_gen(imgs=self.msks_montage_trn, msks=self.msks_montage_trn,
+                                       batch_size=self.config['batch_size'], transform=self.config['transform_train']))
+        gen_val = cycle(self.batch_gen(imgs=self.msks_montage_val, msks=self.msks_montage_val,
+                                       batch_size=self.config['batch_size']))
 
         callbacks = []
 
@@ -266,7 +280,7 @@ class UNet():
             nb_epoch=self.config['nb_epoch'],
             samples_per_epoch=self.config['batch_size'] * 50,
             generator=gen_trn,
-            nb_val_samples=self.config['batch_size'] * 20,
+            nb_val_samples=self.config['batch_size'] * 30,
             validation_data=gen_val,
             initial_epoch=0,
             callbacks=callbacks,
@@ -312,8 +326,7 @@ def train(args):
     model.config['checkpoint_path_model'] = model.checkpoint_name + '.model'
     model.config['checkpoint_path_history'] = model.checkpoint_name + '.history'
     model.config['transform_train'] = True
-    model.config['nb_epoch'] = 10
-    model.config['nb_gpu'] = 2
+    model.config['nb_epoch'] = 15
     model.load_data()
     model.compile()
     model.net.summary()
@@ -361,7 +374,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
 
-    gpu_selection(visible_devices="1,2")
+    gpu_selection()
 
     prs = argparse.ArgumentParser()
     prs.add_argument('--train', help='train', action='store_true')

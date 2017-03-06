@@ -119,7 +119,7 @@ class KerasHistoryPlotCallback(Callback):
             self.logs[key].append(val)
 
         nb_metrics = len([k for k in self.logs.keys() if not k.startswith('val')])
-        nb_col = 5
+        nb_col = 6
         nb_row = int(ceil(nb_metrics / nb_col))
         fig, axs = plt.subplots(nb_row, nb_col, figsize=(min(nb_col * 3, 12), 3 * nb_row))
         for idx, ax in enumerate(fig.axes):
