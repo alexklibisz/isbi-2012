@@ -5,25 +5,24 @@
 from itertools import cycle
 from keras.models import Model, load_model
 from keras.layers import Input, merge, Convolution2D, MaxPooling2D, UpSampling2D, BatchNormalization, Activation, Flatten, Reshape, Lambda, Dropout
-from keras.optimizers import Adam
-from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
-from keras.utils.np_utils import to_categorical
+from keras.optimizers import Adam, RMSprop
+from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping
+from keras.layers.advanced_activations import PReLU
 from skimage.transform import resize
 import argparse
 import keras.backend as K
 import logging
 import numpy as np
-import os
+import hashlib
 import pickle
 import tifffile as tiff
 
 import sys;
 sys.path.append('.')
 from src.utils.runtime import funcname, gpu_selection
-from src.utils.model import dice_coef, fmeasure_onehot, KerasHistoryPlotCallback, KerasSimpleLoggerCallback, \
-    tru_pos, tru_neg, fls_pos, fls_neg, precision_onehot, recall_onehot, jaccard_coef
+from src.utils.model import dice_coef, dice_coef_loss, KerasHistoryPlotCallback, KerasSimpleLoggerCallback, \
+    jaccard_coef, jaccard_coef_int
 from src.utils.data import random_transforms
-from src.utils.multi_gpu import  make_parallel
 
 class UNet():
 
@@ -35,9 +34,9 @@ class UNet():
             'checkpoint_path_history': None,
             'data_path': 'data',
             'img_shape': (512, 512),
-            'input_shape': (128, 128, 1),       # Row dimension has to be a power of 2.
-            'output_shape': (128, 128, 1),
-            'output_shape_onehot': (128, 128, 2),
+            'input_shape': (64, 64, 1),       # Row dimension has to be a power of 2.
+            'output_shape': (64, 64, 1),
+            'output_shape_onehot': (64, 64, 2),
             'prop_trn': 24. / 30.,
             'prop_val': 6. / 30.,
             'montage_trn_shape': (4,6),
@@ -56,6 +55,11 @@ class UNet():
         self.msks_montage_val = None
         self.history = None
 
+        self.mean = None
+        self.std = None
+
+        self.batch_hashes = {}
+
         return
 
     @property
@@ -72,9 +76,14 @@ class UNet():
 
         H, W = self.config['img_shape']
 
-        logger.info('Combining images and masks into montages.')
+        # Randomize selection for training and validation.
         nb_trn = int(len(imgs) * self.config['prop_trn'])
-        imgs_trn, msks_trn = imgs[:nb_trn], msks[:nb_trn]
+        nb_val = int(len(imgs) * self.config['prop_val'])
+        idx = np.arange(len(imgs)); np.random.shuffle(idx)
+        idx_trn, idx_val = idx[:nb_trn], idx[-nb_val:]
+
+        logger.info('Combining images and masks into montages.')
+        imgs_trn, msks_trn = imgs[idx_trn], msks[idx_trn]
         nb_row, nb_col = self.config['montage_trn_shape']
         assert nb_row * nb_col == len(imgs_trn) == len(msks_trn)
         self.imgs_montage_trn = np.empty((nb_row * H, nb_col * W))
@@ -87,7 +96,7 @@ class UNet():
                 self.msks_montage_trn[y0:y1, x0:x1] = next(msks_trn)
 
         logger.info('Combining validation images and masks into montages')
-        imgs_val, msks_val = imgs[nb_trn:], msks[nb_trn:]
+        imgs_val, msks_val = imgs[idx_val], msks[idx_val]
         nb_row, nb_col = self.config['montage_val_shape']
         assert nb_row * nb_col == len(imgs_val) == len(msks_val)
         self.imgs_montage_val = np.empty((nb_row * H, nb_col * W))
@@ -99,14 +108,16 @@ class UNet():
                 self.imgs_montage_val[y0:y1, x0:x1] = next(imgs_val)
                 self.msks_montage_val[y0:y1, x0:x1] = next(msks_val)
 
+        logger.info('Computing mean and standard deviation for pre-processing.')
+        self.mean = np.mean(self.imgs_montage_trn)
+        self.std = np.std(self.imgs_montage_trn)
+
         return
 
-    def batch_gen(self, imgs, msks, batch_size, transform=False):
-
-        logger = logging.getLogger(funcname())
+    def batch_gen(self, imgs, msks, batch_size, transform=False, infinite=False):
 
         if msks is None:
-            msks = np.zeros(imgs.shape)
+            msks = np.random.rand(imgs.shape).round()
         else:
             msks = msks.astype('float32') / np.max(msks)
             assert np.min(msks) == 0 and np.max(msks) == 1, "Masks should be in [0,1]."
@@ -118,27 +129,37 @@ class UNet():
         H, W = imgs.shape
         wdw_H, wdw_W, _ = self.config['input_shape']
 
-        for batch_idx in range(batch_size):
+        while True:
 
-            # Pick a random window to sample.
-            y0, x0 = np.random.randint(0, H - wdw_H), np.random.randint(0, W - wdw_W)
-            y1, x1 = y0 + wdw_H, x0 + wdw_W
+            for batch_idx in range(batch_size):
 
-            img_wdw = imgs[y0:y1, x0:x1]
-            msk_wdw = msks[y0:y1, x0:x1]
+                # Pick a random window to sample.
+                y0, x0 = np.random.randint(0, H - wdw_H), np.random.randint(0, W - wdw_W)
+                y1, x1 = y0 + wdw_H, x0 + wdw_W
 
-            if transform:
-                [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw])
+                img_wdw = imgs[y0:y1, x0:x1].copy()
+                msk_wdw = msks[y0:y1, x0:x1].copy()
 
-            X_batch[batch_idx] = img_wdw.reshape(self.config['input_shape'])
-            Y_batch[batch_idx] = msk_wdw.reshape(self.config['output_shape'])
+                if transform:
+                    [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw])
 
-        X_batch = X_batch - np.min(X_batch)
-        X_batch = X_batch / np.max(X_batch)
-        X_batch = X_batch * 2 - 1
-        assert np.min(X_batch) == -1 and np.max(X_batch) == 1, "X_batch should be in [-1,1]."
+                X_batch[batch_idx] = img_wdw.reshape(self.config['input_shape'])
+                Y_batch[batch_idx] = msk_wdw.reshape(self.config['output_shape'])
 
-        yield (X_batch, Y_batch)
+            # Pre-process and error check.
+            X_batch -= self.mean
+            X_batch /= self.std
+
+            assert np.all(np.unique(Y_batch) == [0,1])
+
+            hash = hashlib.sha1(X_batch).hexdigest() + hashlib.sha1(Y_batch).hexdigest()
+            assert hash not in self.batch_hashes, "Batch repetition."
+            self.batch_hashes[hash] = True
+
+            yield (X_batch, Y_batch)
+
+            if not infinite:
+                break
 
     def compile(self):
 
@@ -147,87 +168,78 @@ class UNet():
         inputs = Input(shape=self.config['input_shape'])
 
         conv1 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(inputs)
-        # conv1 = BatchNormalization(momentum=0.6)(conv1)
+        conv1 = BatchNormalization(momentum=0.6)(conv1)
         conv1 = Activation('relu')(conv1)
         conv1 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(conv1)
-        # conv1 = BatchNormalization(momentum=0.6)(conv1)
+        conv1 = BatchNormalization(momentum=0.6)(conv1)
         conv1 = Activation('relu')(conv1)
-        # conv1 = Dropout(0.2)(conv1)
         pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
 
         conv2 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(pool1)
-        # conv2 = BatchNormalization(momentum=0.6)(conv2)
+        conv2 = BatchNormalization(momentum=0.6)(conv2)
         conv2 = Activation('relu')(conv2)
         conv2 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(conv2)
-        # conv2 = BatchNormalization(momentum=0.6)(conv2)
+        conv2 = BatchNormalization(momentum=0.6)(conv2)
         conv2 = Activation('relu')(conv2)
-        # conv2 = Dropout(0.2)(conv2)
         pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
 
         conv3 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(pool2)
-        # conv3 = BatchNormalization(momentum=0.6)(conv3)
+        conv3 = BatchNormalization(momentum=0.6)(conv3)
         conv3 = Activation('relu')(conv3)
         conv3 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(conv3)
-        # conv3 = BatchNormalization(momentum=0.6)(conv3)
+        conv3 = BatchNormalization(momentum=0.6)(conv3)
         conv3 = Activation('relu')(conv3)
-        # conv3 = Dropout(0.2)(conv3)
         pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
 
         conv4 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(pool3)
-        # conv4 = BatchNormalization(momentum=0.6)(conv4)
+        conv4 = BatchNormalization(momentum=0.6)(conv4)
         conv4 = Activation('relu')(conv4)
         conv4 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(conv4)
-        # conv4 = BatchNormalization(momentum=0.6)(conv4)
+        conv4 = BatchNormalization(momentum=0.6)(conv4)
         conv4 = Activation('relu')(conv4)
-        # conv4 = Dropout(0.2)(conv4)
         pool4 = MaxPooling2D(pool_size=(2, 2))(conv4)
 
         conv5 = Convolution2D(512, 3, 3, activation='linear', border_mode='same')(pool4)
-        # conv5 = BatchNormalization(momentum=0.6)(conv5)
+        conv5 = BatchNormalization(momentum=0.6)(conv5)
         conv5 = Activation('relu')(conv5)
         conv5 = Convolution2D(512, 3, 3, activation='linear', border_mode='same')(conv5)
-        # conv5 = BatchNormalization(momentum=0.6)(conv5)
+        conv5 = BatchNormalization(momentum=0.6)(conv5)
         conv5 = Activation('relu')(conv5)
-        # conv5 = Dropout(0.2)(conv5)
 
         up6 = merge([UpSampling2D(size=(2, 2))(conv5), conv4], mode='concat', concat_axis=3)
         conv6 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(up6)
-        # conv6 = BatchNormalization(momentum=0.6)(conv6)
+        conv6 = BatchNormalization(momentum=0.6)(conv6)
         conv6 = Activation('relu')(conv6)
         conv6 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(conv6)
-        # conv6 = BatchNormalization(momentum=0.6)(conv6)
+        conv6 = BatchNormalization(momentum=0.6)(conv6)
         conv6 = Activation('relu')(conv6)
-        # conv6 = Dropout(0.2)(conv6)
 
         up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3], mode='concat', concat_axis=3)
         conv7 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(up7)
-        # conv7 = BatchNormalization(momentum=0.6)(conv7)
+        conv7 = BatchNormalization(momentum=0.6)(conv7)
         conv7 = Activation('relu')(conv7)
         conv7 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(conv7)
-        # conv7 = BatchNormalization(momentum=0.6)(conv7)
+        conv7 = BatchNormalization(momentum=0.6)(conv7)
         conv7 = Activation('relu')(conv7)
-        # conv7 = Dropout(0.2)(conv7)
 
         up8 = merge([UpSampling2D(size=(2, 2))(conv7), conv2], mode='concat', concat_axis=3)
         conv8 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(up8)
-        # conv8 = BatchNormalization(momentum=0.6)(conv8)
+        conv8 = BatchNormalization(momentum=0.6)(conv8)
         conv8 = Activation('relu')(conv8)
         conv8 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(conv8)
-        # conv8 = BatchNormalization(momentum=0.6)(conv8)
+        conv8 = BatchNormalization(momentum=0.6)(conv8)
         conv8 = Activation('relu')(conv8)
-        # conv8 = Dropout(0.2)(conv8)
 
         up9 = merge([UpSampling2D(size=(2, 2))(conv8), conv1], mode='concat', concat_axis=3)
         conv9 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(up9)
-        # conv9 = BatchNormalization(momentum=0.6)(conv9)
+        conv9 = BatchNormalization(momentum=0.6)(conv9)
         conv9 = Activation('relu')(conv9)
         conv9 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(conv9)
-        # conv9 = BatchNormalization(momentum=0.6)(conv9)
+        conv9 = BatchNormalization(momentum=0.6)(conv9)
         conv9 = Activation('relu')(conv9)
-        # conv9 = Dropout(0.2)(conv9)
 
+        # Softmax Activation setup begin.
         conv10 = Convolution2D(2, 1, 1, activation='linear')(conv9)
-        # conv10 = BatchNormalization(momentum=06)(conv10)
 
         output = Flatten()(conv10)
         H,W,D = self.config['output_shape_onehot']
@@ -242,9 +254,15 @@ class UNet():
         output = Lambda(probability_positive)(output)
         output = Reshape(self.config['output_shape'])(output)
 
+        # # Sigmoid Activation setup begin.
+        # output = BatchNormalization(momentum=0.5)(conv9)
+        # output = Convolution2D(1,1,1, activation='sigmoid')(output)
+        # output = conv10
+
         self.net = Model(input=inputs, output=output)
-        self.net.compile(optimizer=Adam(), loss='binary_crossentropy',
-                         metrics=['fmeasure', 'precision', 'recall', dice_coef])
+        self.net.compile(optimizer=Adam(),
+                         loss='binary_crossentropy',
+                         metrics=['fmeasure', 'precision', 'recall', dice_coef, jaccard_coef, jaccard_coef_int])
 
         return
 
@@ -252,40 +270,35 @@ class UNet():
 
         logger = logging.getLogger(funcname())
 
-        gen_trn = cycle(self.batch_gen(imgs=self.msks_montage_trn, msks=self.msks_montage_trn,
-                                       batch_size=self.config['batch_size'], transform=self.config['transform_train']))
-        gen_val = cycle(self.batch_gen(imgs=self.msks_montage_val, msks=self.msks_montage_val,
-                                       batch_size=self.config['batch_size']))
+        gen_trn = self.batch_gen(imgs=self.imgs_montage_trn, msks=self.msks_montage_trn, infinite=True,
+                                       batch_size=self.config['batch_size'], transform=self.config['transform_train'])
+        gen_val = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, infinite=True,
+                                       batch_size=self.config['batch_size'])
 
-        callbacks = []
-
-        callbacks.append(ReduceLROnPlateau(monitor='val_loss', factor=0.1, patience=5, cooldown=3, min_lr=1e-6, verbose=1))
-
-        if self.config['checkpoint_path_net']:
-            callbacks.append(ModelCheckpoint(self.config['checkpoint_path_net'], monitor='val_loss',
-                                             save_best_only=True, verbose=1))
+        cb = []
+        cb.append(ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, cooldown=3, min_lr=1e-6, verbose=1))
+        cb.append(EarlyStopping(monitor='val_loss', min_delta=1e-2, patience=3, verbose=1, mode='min'))
+        cb.append(ModelCheckpoint(self.checkpoint_name + '_val_loss.net', monitor='val_loss', save_best_only=True,
+                                  verbose=1))
 
         if notebook:
-            callbacks.append(KerasSimpleLoggerCallback())
-            callbacks.append(KerasHistoryPlotCallback())
+            cb.append(KerasSimpleLoggerCallback())
+            cb.append(KerasHistoryPlotCallback())
         else:
             history_plot_cb = KerasHistoryPlotCallback()
             history_plot_cb.file_name = self.checkpoint_name + '.history.png'
-            callbacks.append(history_plot_cb)
+            cb.append(history_plot_cb)
 
         logger.info('Training for %d epochs.' % self.config['nb_epoch'])
-
-        np.random.seed(self.config['seed'])
 
         result = self.net.fit_generator(
             nb_epoch=self.config['nb_epoch'],
             samples_per_epoch=self.config['batch_size'] * 50,
             generator=gen_trn,
-            nb_val_samples=self.config['batch_size'] * 30,
+            nb_val_samples=self.config['batch_size'] * 5,
             validation_data=gen_val,
             initial_epoch=0,
-            callbacks=callbacks,
-            class_weight='auto',
+            callbacks=cb,
             verbose=int(notebook==False)
         )
 
@@ -299,12 +312,18 @@ class UNet():
 
         return
 
+    def evaluate(self):
+        data_gen = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, batch_size=1024)
+        X, Y = next(data_gen)
+        metrics = self.net.evaluate(X, Y, verbose=1, batch_size=self.config['batch_size'])
+        return zip(self.net.metrics_names, metrics)
+
     def save(self):
         logger = logging.getLogger(funcname())
 
         if self.config['checkpoint_path_model']:
             logger.info('Saving model to %s.' % self.config['checkpoint_path_model'])
-            payload = (self.config)
+            payload = (self.config,self.mean,self.std)
             f = open(self.config['checkpoint_path_model'], 'wb')
             pickle.dump(payload, f)
             f.close()
@@ -313,9 +332,11 @@ class UNet():
 
     def load(self, checkpoint_path):
         f = open(checkpoint_path, 'rb')
-        (config) = pickle.load(f)
+        (config,mean,std) = pickle.load(f)
         f.close()
         self.config = config
+        self.mean = mean
+        self.std = std
         return
 
 def train(args):
@@ -323,18 +344,22 @@ def train(args):
     logger = logging.getLogger(funcname())
 
     model = UNet()
-    model.config['checkpoint_path_net'] = args['net'] if args['net'] != None else model.checkpoint_name + '.net'
     model.config['checkpoint_path_model'] = model.checkpoint_name + '.model'
     model.config['checkpoint_path_history'] = model.checkpoint_name + '.history'
-    model.config['transform_train'] = True
-    model.config['nb_epoch'] = 15
+    model.config['transform_train'] = False
+    model.config['nb_epoch'] = 25
+
+    np.random.seed(model.config['seed'])
     model.load_data()
+    model.save()
     model.compile()
     model.net.summary()
-    if os.path.exists(model.config['checkpoint_path_net']):
-        logger.info('Loading saved weights from %s.' % model.config['checkpoint_path_net'])
-        model.net.load_weights(model.config['checkpoint_path_net'])
+    if args['net']:
+        logger.info('Loading saved weights from %s.' % args['net'])
+        model.net.load_weights(args['net'])
+
     model.train()
+    logger.info(model.evaluate())
     model.save()
     return
 
@@ -342,12 +367,12 @@ def submit(args):
     logger = logging.getLogger(funcname())
 
     model = UNet()
-    model.config['checkpoint_path_net'] = args['net'] if args['net'] != None else model.checkpoint_name + '.net'
     model.compile()
     model.net.summary()
-    if os.path.exists(model.config['checkpoint_path_net']):
-        logger.info('Loading saved weights from %s.' % model.config['checkpoint_path_net'])
-        model.net.load_weights(model.config['checkpoint_path_net'])
+
+    if args['net']:
+        logger.info('Loading saved weights from %s.' % args['net'])
+        model.net.load_weights(args['net'])
 
     logger.info('Loading training images...')
     model.load_data()
@@ -375,13 +400,14 @@ def main():
 
     logging.basicConfig(level=logging.INFO)
 
-    gpu_selection()
-
     prs = argparse.ArgumentParser()
     prs.add_argument('--train', help='train', action='store_true')
     prs.add_argument('--submit', help='submit', action='store_true')
     prs.add_argument('--net', help='path to network weights', type=str)
+    prs.add_argument('--gpu', help='gpu visible device', type=str, default='1')
     args = vars(prs.parse_args())
+
+    gpu_selection(visible_devices=args['gpu'])
 
     if args['train']:
         train(args)
