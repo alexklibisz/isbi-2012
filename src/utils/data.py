@@ -1,13 +1,19 @@
 import numpy as np
+from skimage.filters import gaussian
+from skimage.util import random_noise
 
 def random_transforms(items, nb_min=0, nb_max=6):
 
     all_transforms = [
+        lambda x: x,
         lambda x: np.fliplr(x),
         lambda x: np.flipud(x),
         lambda x: np.rot90(x, 1),
         lambda x: np.rot90(x, 2),
-        lambda x: np.rot90(x, 3)
+        lambda x: np.rot90(x, 3),
+
+        # TODO: "Zoom" by cropping and resizing.
+
     ]
 
     n = np.random.randint(nb_min, nb_max + 1)

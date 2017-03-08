@@ -3,17 +3,15 @@
 # - Downsizing the images to 128x128 and then resizing back to 512x512 for submission.
 # - Added stand-alone activation layers and batch normalization after each of them.
 from itertools import cycle
-from keras.models import Model, load_model
+from keras.models import Model
 from keras.layers import Input, merge, Convolution2D, MaxPooling2D, UpSampling2D, BatchNormalization, Activation, Flatten, Reshape, Lambda, Dropout
-from keras.optimizers import Adam, RMSprop
+from keras.optimizers import Adam
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping
-from keras.layers.advanced_activations import PReLU
 from skimage.transform import resize
 import argparse
 import keras.backend as K
 import logging
 import numpy as np
-import hashlib
 import pickle
 import tifffile as tiff
 
@@ -34,17 +32,17 @@ class UNet():
             'checkpoint_path_history': None,
             'data_path': 'data',
             'img_shape': (512, 512),
-            'input_shape': (64, 64, 1),       # Row dimension has to be a power of 2.
-            'output_shape': (64, 64, 1),
-            'output_shape_onehot': (64, 64, 2),
+            'input_shape': (256, 256, 1),       # Row dimension has to be a power of 2.
+            'output_shape': (256, 256, 1),
+            'output_shape_onehot': (256, 256, 2),
             'prop_trn': 24. / 30.,
             'prop_val': 6. / 30.,
             'montage_trn_shape': (4,6),
             'montage_val_shape': (2,3),
             'transform_train': False,
-            'batch_size': 64,
+            'batch_size': 1,
             'nb_epoch': 25,
-            'seed': 865,
+            'seed': 423,
             'nb_gpu': 1
         }
 
@@ -54,11 +52,6 @@ class UNet():
         self.imgs_montage_val = None
         self.msks_montage_val = None
         self.history = None
-
-        self.mean = None
-        self.std = None
-
-        self.batch_hashes = {}
 
         return
 
@@ -112,16 +105,25 @@ class UNet():
         self.mean = np.mean(self.imgs_montage_trn)
         self.std = np.std(self.imgs_montage_trn)
 
+        # Correct the types.
+        self.imgs_montage_trn = self.imgs_montage_trn.astype(np.float32)
+        self.msks_montage_trn = self.msks_montage_trn.astype(np.uint8)
+        self.imgs_montage_val = self.imgs_montage_val.astype(np.float32)
+        self.msks_montage_val = self.msks_montage_val.astype(np.uint8)
+
         return
 
     def batch_gen(self, imgs, msks, batch_size, transform=False, infinite=False):
 
+        assert imgs.dtype == np.float32
+
         if msks is None:
-            msks = np.random.rand(imgs.shape).round()
+            msks = np.random.rand(imgs.shape).round().astype(np.uint8)
         else:
-            msks = msks.astype('float32') / np.max(msks)
+            msks = (msks > 0).astype('uint8')
+            assert msks.dtype == np.uint8
             assert np.min(msks) == 0 and np.max(msks) == 1, "Masks should be in [0,1]."
-            assert len(np.unique(msks)) == 2, "Masks should be binary."
+            assert np.all(np.unique(msks) == [0,1]), "Masks should be binary."
 
         X_batch = np.empty((batch_size,) + self.config['input_shape'])
         Y_batch = np.empty((batch_size,) + self.config['output_shape'])
@@ -141,21 +143,18 @@ class UNet():
                 msk_wdw = msks[y0:y1, x0:x1].copy()
 
                 if transform:
-                    [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw])
+                    [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw], nb_max=20)
 
                 X_batch[batch_idx] = img_wdw.reshape(self.config['input_shape'])
                 Y_batch[batch_idx] = msk_wdw.reshape(self.config['output_shape'])
 
-            # Pre-process and error check.
-            X_batch -= self.mean
-            X_batch /= self.std
-
+            X_batch -= np.min(X_batch)  # [0, max]
+            X_batch /= np.max(X_batch)  # [0, 1]
+            X_batch *= 2                # [0, 2]
+            X_batch -= 1                # [-1, 1]
+            assert np.min(X_batch) == -1
+            assert np.max(X_batch) == 1
             assert np.all(np.unique(Y_batch) == [0,1])
-
-            hash = hashlib.sha1(X_batch).hexdigest() + hashlib.sha1(Y_batch).hexdigest()
-            assert hash not in self.batch_hashes, "Batch repetition."
-            self.batch_hashes[hash] = True
-
             yield (X_batch, Y_batch)
 
             if not infinite:
@@ -167,106 +166,85 @@ class UNet():
 
         inputs = Input(shape=self.config['input_shape'])
 
-        conv1 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(inputs)
-        conv1 = BatchNormalization(momentum=0.6)(conv1)
+        conv1 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(inputs)
         conv1 = Activation('relu')(conv1)
-        conv1 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(conv1)
-        conv1 = BatchNormalization(momentum=0.6)(conv1)
+        conv1 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(conv1)
         conv1 = Activation('relu')(conv1)
-        pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+        pool1 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv1)
 
-        conv2 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(pool1)
-        conv2 = BatchNormalization(momentum=0.6)(conv2)
+        conv2 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(pool1)
         conv2 = Activation('relu')(conv2)
-        conv2 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(conv2)
-        conv2 = BatchNormalization(momentum=0.6)(conv2)
+        conv2 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(conv2)
         conv2 = Activation('relu')(conv2)
-        pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+        pool2 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv2)
 
-        conv3 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(pool2)
-        conv3 = BatchNormalization(momentum=0.6)(conv3)
+        conv3 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(pool2)
         conv3 = Activation('relu')(conv3)
-        conv3 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(conv3)
-        conv3 = BatchNormalization(momentum=0.6)(conv3)
+        conv3 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(conv3)
         conv3 = Activation('relu')(conv3)
-        pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
+        pool3 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv3)
 
-        conv4 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(pool3)
-        conv4 = BatchNormalization(momentum=0.6)(conv4)
+        conv4 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(pool3)
         conv4 = Activation('relu')(conv4)
-        conv4 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(conv4)
-        conv4 = BatchNormalization(momentum=0.6)(conv4)
+        conv4 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(conv4)
         conv4 = Activation('relu')(conv4)
-        pool4 = MaxPooling2D(pool_size=(2, 2))(conv4)
+        conv4 = Dropout(0.5)(conv4)
+        pool4 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv4)
 
-        conv5 = Convolution2D(512, 3, 3, activation='linear', border_mode='same')(pool4)
-        conv5 = BatchNormalization(momentum=0.6)(conv5)
+        conv5 = Convolution2D(512, 3, 3, border_mode='same', init='he_normal')(pool4)
         conv5 = Activation('relu')(conv5)
-        conv5 = Convolution2D(512, 3, 3, activation='linear', border_mode='same')(conv5)
-        conv5 = BatchNormalization(momentum=0.6)(conv5)
+        conv5 = Convolution2D(512, 3, 3, border_mode='same', init='he_normal')(conv5)
         conv5 = Activation('relu')(conv5)
+        conv5 = Dropout(0.5)(conv5)
 
         up6 = merge([UpSampling2D(size=(2, 2))(conv5), conv4], mode='concat', concat_axis=3)
-        conv6 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(up6)
-        conv6 = BatchNormalization(momentum=0.6)(conv6)
+        conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(up6)
         conv6 = Activation('relu')(conv6)
-        conv6 = Convolution2D(256, 3, 3, activation='linear', border_mode='same')(conv6)
-        conv6 = BatchNormalization(momentum=0.6)(conv6)
+        conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(conv6)
         conv6 = Activation('relu')(conv6)
 
         up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3], mode='concat', concat_axis=3)
-        conv7 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(up7)
-        conv7 = BatchNormalization(momentum=0.6)(conv7)
+        conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(up7)
         conv7 = Activation('relu')(conv7)
-        conv7 = Convolution2D(128, 3, 3, activation='linear', border_mode='same')(conv7)
-        conv7 = BatchNormalization(momentum=0.6)(conv7)
+        conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(conv7)
         conv7 = Activation('relu')(conv7)
 
         up8 = merge([UpSampling2D(size=(2, 2))(conv7), conv2], mode='concat', concat_axis=3)
-        conv8 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(up8)
-        conv8 = BatchNormalization(momentum=0.6)(conv8)
+        conv8 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(up8)
         conv8 = Activation('relu')(conv8)
-        conv8 = Convolution2D(64, 3, 3, activation='linear', border_mode='same')(conv8)
-        conv8 = BatchNormalization(momentum=0.6)(conv8)
+        conv8 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(conv8)
         conv8 = Activation('relu')(conv8)
 
         up9 = merge([UpSampling2D(size=(2, 2))(conv8), conv1], mode='concat', concat_axis=3)
-        conv9 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(up9)
-        conv9 = BatchNormalization(momentum=0.6)(conv9)
+        conv9 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(up9)
         conv9 = Activation('relu')(conv9)
-        conv9 = Convolution2D(32, 3, 3, activation='linear', border_mode='same')(conv9)
-        conv9 = BatchNormalization(momentum=0.6)(conv9)
+        conv9 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(conv9)
         conv9 = Activation('relu')(conv9)
 
         # Softmax Activation setup begin.
-        conv10 = Convolution2D(2, 1, 1, activation='linear')(conv9)
+        conv10 = Convolution2D(2, 1, 1)(conv9)
 
         output = Flatten()(conv10)
         H,W,D = self.config['output_shape_onehot']
         output = Reshape((H*W,D))(output)
         output = Activation('softmax')(output)
-        output = Reshape(self.config['output_shape_onehot'])(output)
+        output = Reshape(self.config['output_shape_onehot'])(output) # 128 x 128 x 2
 
+        # TODO: consider not doing this... maybe it makes a difference in how the loss function works.
         # Slicing off the softmax probability of having a positive sample.
         # This allows you to use the regular keras metrics and avoid all the np.argmax() calls.
         def probability_positive(onehot):
             return onehot[:,:,:,1]
         output = Lambda(probability_positive)(output)
-        output = Reshape(self.config['output_shape'])(output)
-
-        # # Sigmoid Activation setup begin.
-        # output = BatchNormalization(momentum=0.5)(conv9)
-        # output = Convolution2D(1,1,1, activation='sigmoid')(output)
-        # output = conv10
+        output = Reshape(self.config['output_shape'])(output) # 128 x 128
 
         self.net = Model(input=inputs, output=output)
-        self.net.compile(optimizer=Adam(),
-                         loss='binary_crossentropy',
+        self.net.compile(optimizer=Adam(lr=0.001), loss='binary_crossentropy',
                          metrics=['fmeasure', 'precision', 'recall', dice_coef, jaccard_coef, jaccard_coef_int])
 
         return
 
-    def train(self, notebook=False):
+    def train(self):
 
         logger = logging.getLogger(funcname())
 
@@ -277,29 +255,26 @@ class UNet():
 
         cb = []
         cb.append(ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, cooldown=3, min_lr=1e-6, verbose=1))
-        cb.append(EarlyStopping(monitor='val_loss', min_delta=1e-2, patience=3, verbose=1, mode='min'))
+        cb.append(EarlyStopping(monitor='val_loss', min_delta=1e-2, patience=10, verbose=1, mode='min'))
         cb.append(ModelCheckpoint(self.checkpoint_name + '_val_loss.net', monitor='val_loss', save_best_only=True,
                                   verbose=1))
 
-        if notebook:
-            cb.append(KerasSimpleLoggerCallback())
-            cb.append(KerasHistoryPlotCallback())
-        else:
-            history_plot_cb = KerasHistoryPlotCallback()
-            history_plot_cb.file_name = self.checkpoint_name + '.history.png'
-            cb.append(history_plot_cb)
+        history_plot_cb = KerasHistoryPlotCallback()
+        history_plot_cb.file_name = self.checkpoint_name + '.history.png'
+        cb.append(history_plot_cb)
 
         logger.info('Training for %d epochs.' % self.config['nb_epoch'])
 
         result = self.net.fit_generator(
             nb_epoch=self.config['nb_epoch'],
-            samples_per_epoch=self.config['batch_size'] * 50,
+            samples_per_epoch=max(self.config['batch_size'] * 50, 2048),
             generator=gen_trn,
-            nb_val_samples=self.config['batch_size'] * 5,
+            nb_val_samples=self.config['batch_size'] * 25,
             validation_data=gen_val,
             initial_epoch=0,
             callbacks=cb,
-            verbose=int(notebook==False)
+            class_weight='auto',
+            verbose=1
         )
 
         self.history = result.history
@@ -313,7 +288,8 @@ class UNet():
         return
 
     def evaluate(self):
-        data_gen = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, batch_size=1024)
+        np.random.seed(777)
+        data_gen = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, batch_size=2048)
         X, Y = next(data_gen)
         metrics = self.net.evaluate(X, Y, verbose=1, batch_size=self.config['batch_size'])
         return zip(self.net.metrics_names, metrics)
@@ -346,8 +322,8 @@ def train(args):
     model = UNet()
     model.config['checkpoint_path_model'] = model.checkpoint_name + '.model'
     model.config['checkpoint_path_history'] = model.checkpoint_name + '.history'
-    model.config['transform_train'] = False
-    model.config['nb_epoch'] = 25
+    model.config['transform_train'] = True
+    model.config['nb_epoch'] = 250
 
     np.random.seed(model.config['seed'])
     model.load_data()
