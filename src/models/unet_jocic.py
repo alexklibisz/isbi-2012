@@ -2,7 +2,6 @@
 # Major changes:
 # - Downsizing the images to 128x128 and then resizing back to 512x512 for submission.
 # - Added stand-alone activation layers and batch normalization after each of them.
-from itertools import cycle
 from keras.models import Model
 from keras.layers import Input, merge, Convolution2D, MaxPooling2D, UpSampling2D, BatchNormalization, Activation, Flatten, Reshape, Lambda, Dropout
 from keras.optimizers import Adam
@@ -28,7 +27,7 @@ class UNet():
 
         self.config = {
             'checkpoint_path_net': None,
-            'checkpoint_path_model': None,
+            'checkpoint_path_config': None,
             'checkpoint_path_history': None,
             'data_path': 'data',
             'img_shape': (512, 512),
@@ -119,7 +118,7 @@ class UNet():
             msks = (msks > 0).astype('uint8')
             assert msks.dtype == np.uint8
             assert np.min(msks) == 0 and np.max(msks) == 1, "Masks should be in [0,1]."
-            assert np.all(np.unique(msks) == [0,1]), "Masks should be binary."
+            assert len(np.unique(msks)) == 2, "Masks should be binary."
 
         X_batch = np.empty((batch_size,) + self.config['input_shape'])
         Y_batch = np.empty((batch_size,) + self.config['output_shape'])
@@ -150,7 +149,7 @@ class UNet():
             X_batch -= 1                # [-1, 1]
             assert np.min(X_batch) == -1
             assert np.max(X_batch) == 1
-            assert np.all(np.unique(Y_batch) == [0,1])
+            assert len(np.unique(Y_batch)) <= 2
             yield (X_batch, Y_batch)
 
             if not infinite:
@@ -187,58 +186,76 @@ class UNet():
         inputs = Input(shape=self.config['input_shape'])
 
         conv1 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(inputs)
+        conv1 = BatchNormalization()(conv1)
         conv1 = Activation('relu')(conv1)
         conv1 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(conv1)
+        conv1 = BatchNormalization()(conv1)
         conv1 = Activation('relu')(conv1)
         pool1 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv1)
 
         conv2 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(pool1)
+        conv2 = BatchNormalization()(conv2)
         conv2 = Activation('relu')(conv2)
         conv2 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(conv2)
+        conv2 = BatchNormalization()(conv2)
         conv2 = Activation('relu')(conv2)
         pool2 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv2)
 
         conv3 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(pool2)
+        conv3 = BatchNormalization()(conv3)
         conv3 = Activation('relu')(conv3)
         conv3 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(conv3)
+        conv3 = BatchNormalization()(conv3)
         conv3 = Activation('relu')(conv3)
         pool3 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv3)
 
         conv4 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(pool3)
+        conv4 = BatchNormalization()(conv4)
         conv4 = Activation('relu')(conv4)
         conv4 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(conv4)
+        conv4 = BatchNormalization()(conv4)
         conv4 = Activation('relu')(conv4)
         conv4 = Dropout(0.5)(conv4)
         pool4 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv4)
 
         conv5 = Convolution2D(512, 3, 3, border_mode='same', init='he_normal')(pool4)
+        conv5 = BatchNormalization()(conv5)
         conv5 = Activation('relu')(conv5)
         conv5 = Convolution2D(512, 3, 3, border_mode='same', init='he_normal')(conv5)
+        conv5 = BatchNormalization()(conv5)
         conv5 = Activation('relu')(conv5)
         conv5 = Dropout(0.5)(conv5)
 
         up6 = merge([UpSampling2D(size=(2, 2))(conv5), conv4], mode='concat', concat_axis=3)
         conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(up6)
+        conv6 = BatchNormalization()(conv6)
         conv6 = Activation('relu')(conv6)
         conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(conv6)
+        conv6 = BatchNormalization()(conv6)
         conv6 = Activation('relu')(conv6)
 
         up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3], mode='concat', concat_axis=3)
         conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(up7)
+        conv7 = BatchNormalization()(conv7)
         conv7 = Activation('relu')(conv7)
         conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(conv7)
+        conv7 = BatchNormalization()(conv7)
         conv7 = Activation('relu')(conv7)
 
         up8 = merge([UpSampling2D(size=(2, 2))(conv7), conv2], mode='concat', concat_axis=3)
         conv8 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(up8)
+        conv8 = BatchNormalization()(conv8)
         conv8 = Activation('relu')(conv8)
         conv8 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(conv8)
+        conv8 = BatchNormalization()(conv8)
         conv8 = Activation('relu')(conv8)
 
         up9 = merge([UpSampling2D(size=(2, 2))(conv8), conv1], mode='concat', concat_axis=3)
         conv9 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(up9)
+        conv9 = BatchNormalization()(conv9)
         conv9 = Activation('relu')(conv9)
         conv9 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(conv9)
+        conv9 = BatchNormalization()(conv9)
         conv9 = Activation('relu')(conv9)
 
         # Softmax Activation setup begin.
@@ -247,6 +264,7 @@ class UNet():
         output = Flatten()(conv10)
         H,W,D = self.config['output_shape_onehot']
         output = Reshape((H*W,D))(output)
+        output = BatchNormalization()(output)
         output = Activation('softmax')(output)
         output = Reshape(self.config['output_shape_onehot'])(output) # 128 x 128 x 2
 
@@ -259,7 +277,7 @@ class UNet():
         output = Reshape(self.config['output_shape'])(output) # 128 x 128
 
         self.net = Model(input=inputs, output=output)
-        self.net.compile(optimizer=Adam(lr=0.001), loss='binary_crossentropy',
+        self.net.compile(optimizer=Adam(lr=0.005), loss='binary_crossentropy',
                          metrics=['fmeasure', 'precision', 'recall', dice_coef, jaccard_coef, jaccard_coef_int])
 
         return
@@ -287,9 +305,9 @@ class UNet():
 
         result = self.net.fit_generator(
             nb_epoch=self.config['nb_epoch'],
-            samples_per_epoch=max(self.config['batch_size'] * 50, 2048),
+            samples_per_epoch=max(self.config['batch_size'] * 50, 768),
             generator=gen_trn,
-            nb_val_samples=self.config['batch_size'] * 25,
+            nb_val_samples=max(self.config['batch_size'] * 25, 512),
             validation_data=gen_val,
             initial_epoch=0,
             callbacks=cb,
@@ -309,7 +327,7 @@ class UNet():
 
     def evaluate(self):
         np.random.seed(777)
-        data_gen = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, batch_size=2048)
+        data_gen = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, batch_size=self.config['batch_size'])
         X, Y = next(data_gen)
         metrics = self.net.evaluate(X, Y, verbose=1, batch_size=self.config['batch_size'])
         return zip(self.net.metrics_names, metrics)
@@ -317,10 +335,10 @@ class UNet():
     def save(self):
         logger = logging.getLogger(funcname())
 
-        if self.config['checkpoint_path_model']:
-            logger.info('Saving model to %s.' % self.config['checkpoint_path_model'])
-            payload = (self.config,self.mean,self.std)
-            f = open(self.config['checkpoint_path_model'], 'wb')
+        if self.config['checkpoint_path_config']:
+            logger.info('Saving model to %s.' % self.config['checkpoint_path_config'])
+            payload = self.config
+            f = open(self.config['checkpoint_path_config'], 'wb')
             pickle.dump(payload, f)
             f.close()
 
@@ -328,7 +346,7 @@ class UNet():
 
     def load(self, checkpoint_path):
         f = open(checkpoint_path, 'rb')
-        (config,mean,std) = pickle.load(f)
+        config = pickle.load(f)
         f.close()
         self.config = config
         self.mean = mean
@@ -340,7 +358,7 @@ def train(args):
     logger = logging.getLogger(funcname())
 
     model = UNet()
-    model.config['checkpoint_path_model'] = model.checkpoint_name + '.model'
+    model.config['checkpoint_path_config'] = model.checkpoint_name + '.config'
     model.config['checkpoint_path_history'] = model.checkpoint_name + '.history'
     model.config['transform_train'] = True
     model.config['nb_epoch'] = 250
