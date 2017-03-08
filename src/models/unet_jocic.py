@@ -349,8 +349,6 @@ class UNet():
         config = pickle.load(f)
         f.close()
         self.config = config
-        self.mean = mean
-        self.std = std
         return
 
 def train(args):
