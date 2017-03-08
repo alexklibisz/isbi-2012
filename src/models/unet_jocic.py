@@ -101,10 +101,6 @@ class UNet():
                 self.imgs_montage_val[y0:y1, x0:x1] = next(imgs_val)
                 self.msks_montage_val[y0:y1, x0:x1] = next(msks_val)
 
-        logger.info('Computing mean and standard deviation for pre-processing.')
-        self.mean = np.mean(self.imgs_montage_trn)
-        self.std = np.std(self.imgs_montage_trn)
-
         # Correct the types.
         self.imgs_montage_trn = self.imgs_montage_trn.astype(np.float32)
         self.msks_montage_trn = self.msks_montage_trn.astype(np.uint8)
@@ -159,6 +155,30 @@ class UNet():
 
             if not infinite:
                 break
+
+    def batch_gen_submit(self, img_stack):
+
+        nb_imgs, img_H, img_W = img_stack.shape
+        wdw_H, wdw_W, _ = self.config['input_shape']
+        nb_wdws = (img_W / wdw_W) * (img_H / wdw_H)
+        X_batch = np.empty((nb_wdws * nb_imgs, ) + self.config['input_shape'])
+        coords = []
+
+        for img_idx, img in enumerate(img_stack):
+            for y0 in range(0, img_H, wdw_H):
+                for x0 in range(0, img_W, wdw_W):
+                    y1, x1 = y0 + wdw_H, x0 + wdw_W
+                    coords.append((img_idx,y0,y1,x0,x1))
+                    X_batch[len(coords)-1] = img[y0:y1,x0:x1].reshape(self.config['input_shape'])
+
+        X_batch -= np.min(X_batch)
+        X_batch /= np.max(X_batch)
+        X_batch *= 2
+        X_batch -= 1
+        assert np.min(X_batch) == -1
+        assert np.max(X_batch) == 1
+
+        return X_batch, coords
 
     def compile(self):
 
@@ -343,6 +363,11 @@ def submit(args):
     logger = logging.getLogger(funcname())
 
     model = UNet()
+    
+    if args['model']:
+        logger.info('Loading model from %s.' % args['model'])
+        model.load(args['model'])
+
     model.compile()
     model.net.summary()
 
@@ -354,23 +379,21 @@ def submit(args):
     model.load_data()
 
     logger.info('Loading testing images...')
-    imgs = tiff.imread('data/test-volume.tif')
-
-    logger.info('Converting to batch...')
-    data_gen = model.batch_gen(imgs=imgs, msks=None, batch_size=len(imgs))
-    imgs_batch, _ = next(data_gen)
+    img_stack = tiff.imread('data/test-volume.tif')
+    X_batch, coords = model.batch_gen_submit(img_stack)
 
     logger.info('Making predictions on batch...')
-    prds_batch = model.net.predict(imgs_batch)
+    prd_batch = model.net.predict(X_batch, batch_size=model.config['batch_size'])
 
-    logger.info('Resizing predictions %s -> %s...' % (str(prds_batch.shape), str(imgs.shape)))
-    # prds_batch = np.array([np.argmax(p, axis=2) * 1.0 for p in prds_batch])
-    prds_batch = np.array([resize(p, imgs.shape[1:]) for p in prds_batch])
-    prds_batch = prds_batch.reshape(imgs.shape).astype('float32')
+    logger.info('Reconstructing images...')
+    prd_stack = np.empty(img_stack.shape)
+    for prd_wdw, (img_idx, y0, y1, x0, x1) in zip(prd_batch, coords):
+        prd_stack[img_idx,y0:y1,x0:x1] = prd_wdw.reshape(y1-y0,x1-x0)
+    prd_stack = prd_stack.astype('float32')
 
     logger.info('Saving full size predictions...')
-    tiff.imsave(model.checkpoint_name + '.submission.tif', prds_batch)
-    logger.info('Done - saved file to %s.' % model.checkpoint_name + '.submission.tif')
+    tiff.imsave(model.checkpoint_name + '.submission.tif', prd_stack)
+    logger.info('Done - saved file to %s.' % (model.checkpoint_name + '.submission.tif'))
 
 def main():
 
@@ -380,6 +403,7 @@ def main():
     prs.add_argument('--train', help='train', action='store_true')
     prs.add_argument('--submit', help='submit', action='store_true')
     prs.add_argument('--net', help='path to network weights', type=str)
+    prs.add_argument('--model', help='path to serialized model', type=str)
     prs.add_argument('--gpu', help='gpu visible device', type=str, default='1')
     args = vars(prs.parse_args())
 
