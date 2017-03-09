@@ -18,7 +18,7 @@ import sys
 sys.path.append('.')
 from src.utils.runtime import funcname, gpu_selection
 from src.utils.model import dice_coef, dice_coef_loss, KerasHistoryPlotCallback, KerasSimpleLoggerCallback, \
-    jaccard_coef, jaccard_coef_int, tru_pos, tru_neg, fls_pos, fls_neg
+    jaccard_coef, jaccard_coef_int
 from src.utils.data import random_transforms
 
 
@@ -266,7 +266,7 @@ class UNet():
 
         self.net = Model(input=inputs, output=output)
         self.net.compile(optimizer=Adam(lr=0.0005), loss='binary_crossentropy',
-                         metrics=['fmeasure', 'precision', 'recall', dice_coef, jaccard_coef, jaccard_coef_int, tru_pos, fls_pos, tru_neg, fls_neg])
+                         metrics=['fmeasure', 'precision', 'recall', dice_coef, jaccard_coef, jaccard_coef_int])
 
         return
 
