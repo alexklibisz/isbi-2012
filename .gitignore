@@ -6,3 +6,4 @@ checkpoints/*
 !checkpoints/*.net
 
 *.out
+*.bak
