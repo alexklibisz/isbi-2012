@@ -36,9 +36,9 @@ class UNet():
             'output_shape': (256, 256, 1),
             'output_shape_onehot': (256, 256, 2),
             'prop_trn': 30. / 30.,
-            'prop_val':  9. / 30.,
+            'prop_val':  30. / 30.,
             'montage_trn_shape': (5, 6),
-            'montage_val_shape': (3, 3),
+            'montage_val_shape': (6, 5),
             'transform_train': False,
             'batch_size': 1,
             'nb_epoch': 25,
@@ -148,7 +148,7 @@ class UNet():
                 img_wdw = self._img_preprocess(img_wdw)
 
                 if transform:
-                    [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw], nb_max=3)
+                    [img_wdw, msk_wdw] = random_transforms([img_wdw, msk_wdw], nb_max=20)
                     img_wdw = self._img_preprocess(img_wdw)
 
                 X_batch[batch_idx] = img_wdw.reshape(self.config['input_shape'])
@@ -208,6 +208,7 @@ class UNet():
         conv3 = Activation('relu')(conv3)
         conv3 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(conv3)
         conv3 = Activation('relu')(conv3)
+        conv3 = Dropout(0.5)(conv3)
         pool3 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2))(conv3)
 
         conv4 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(pool3)
@@ -228,6 +229,7 @@ class UNet():
         conv6 = Activation('relu')(conv6)
         conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(conv6)
         conv6 = Activation('relu')(conv6)
+        conv6 = Dropout(0.5)(conv6)
 
         up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3], mode='concat', concat_axis=3)
         conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(up7)
