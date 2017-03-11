@@ -7,6 +7,7 @@ from keras.layers import Input, merge, Convolution2D, MaxPooling2D, UpSampling2D
 from keras.optimizers import Adam
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping
 from skimage.transform import resize
+from time import time
 import argparse
 import keras.backend as K
 import logging
@@ -116,7 +117,7 @@ class UNet():
         img *= 2           # [0,2]
         return img - 1     # [-1,1]
 
-    def batch_gen(self, imgs, msks, batch_size, transform=False, infinite=False):
+    def batch_gen(self, imgs, msks, batch_size, transform=False, infinite=False, re_seed=False):
 
         assert imgs.dtype == np.float32
 
@@ -135,6 +136,9 @@ class UNet():
         wdw_H, wdw_W, _ = self.config['input_shape']
 
         while True:
+
+            if re_seed:
+                np.random.seed(int(time()) + np.random.randint(0, 2**16))
 
             for batch_idx in range(batch_size):
 
@@ -276,9 +280,9 @@ class UNet():
 
         logger = logging.getLogger(funcname())
 
-        gen_trn = self.batch_gen(imgs=self.imgs_montage_trn, msks=self.msks_montage_trn, infinite=True,
+        gen_trn = self.batch_gen(imgs=self.imgs_montage_trn, msks=self.msks_montage_trn, infinite=True, re_seed=True,
                                  batch_size=self.config['batch_size'], transform=self.config['transform_train'])
-        gen_val = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, infinite=True,
+        gen_val = self.batch_gen(imgs=self.imgs_montage_val, msks=self.msks_montage_val, infinite=True, re_seed=True,
                                  batch_size=self.config['batch_size'])
 
         cb = []
