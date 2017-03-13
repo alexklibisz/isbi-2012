@@ -270,8 +270,21 @@ class UNet():
         output = Lambda(probability_positive)(output)
         output = Reshape(self.config['output_shape'])(output)
 
+        def weighted_log_loss(yt, yp):
+            # Log loss weighs boundary errors more heavily to encourage clean boundaries.
+            # This is similar to UNet paper.
+            a = yt * K.log(yp + K.epsilon())
+            b = (1 - yt) * K.log(1 + K.epsilon() - yp)
+            m = 5
+            w = ((yt - 1) * -1) * (m - 1) + 1  # [0,1] -> [-1,0] -> [1,0] -> [m-1,0] -> [m,1]
+            return -1 * K.mean(w * (a + b))
+            # Below return statement would match the keras binary_crossentropy value.
+            # return -1. * K.mean((a + b))
+
         self.net = Model(input=inputs, output=output)
-        self.net.compile(optimizer=Adam(lr=0.0005), loss='binary_crossentropy',
+        self.net.compile(optimizer=Adam(lr=0.0005),
+                         # loss='binary_crossentropy',
+                         loss=weighted_log_loss,
                          metrics=['fmeasure', 'precision', 'recall', dice_coef, jaccard_coef, jaccard_coef_int])
 
         return
