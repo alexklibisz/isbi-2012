@@ -4,6 +4,18 @@ Image Segmentation Techniques on the ISBI 2012 dataset: http://brainiac2.mit.edu
 
 ## Results
 
+- 3/11/17:
+    - Rand score ~0.9571, information score ~0.9821.
+    - [Commit](https://github.com/alexklibisz/isbi-2012/commit/17fcc3edda94611bf0dd6edb8765fa7ceded11ca)
+    - [Submission](http://brainiac2.mit.edu/isbi_challenge/content/unet-256x256-tiles-re-seeding-each-batch)
+    - Re-seeding the RNG before every new batch for both training and validation gave the best information score so far. Didn't train this network for very long, so hopefully more training will improve the rand score.
+
+- 3/11/17:
+    - Rand score ~0.9641, information score ~0.9805.
+    - [Commit](https://github.com/alexklibisz/isbi-2012/commit/88c2434e6066a6cbd8e8f36e0166108e30660dfe)
+    - [Submission](http://brainiac2.mit.edu/isbi_challenge/content/unet-256x256-tiles-using-all-30-images-tv)
+    - Using all 30 images for both training and validation gave the best rand score so far, but just barely.
+
 - 3/9/17:
     - Rand score ~0.9511, information score ~0.9805, would have made it on the leaderboard but it was worse than my prior submission.
     - [Commit](https://github.com/alexklibisz/isbi-2012/commit/5f8b559a7fb4e9cce4548318a8cecac7b318962e)
