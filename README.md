@@ -4,6 +4,12 @@ Image Segmentation Techniques on the ISBI 2012 dataset: http://brainiac2.mit.edu
 
 ## Results
 
+- 3/13/17
+    - Rand score ~0.9620, information score 0.9828.
+    - [Commit](https://github.com/alexklibisz/isbi-2012/commit/37dbde55819ecd442504f3e5c1a80fa877a4614b)
+    - [Submission](http://brainiac2.mit.edu/isbi_challenge/content/unet-weighted-log-loss-cost-function)
+    - Used a weighted cost function to put 5x error on the boundary areas, similar to approach described in UNet paper.
+
 - 3/11/17:
     - Rand score ~0.9571, information score ~0.9821.
     - [Commit](https://github.com/alexklibisz/isbi-2012/commit/17fcc3edda94611bf0dd6edb8765fa7ceded11ca)
