@@ -179,7 +179,8 @@ class UNet():
                 for x0 in range(0, img_W, wdw_W):
                     y1, x1 = y0 + wdw_H, x0 + wdw_W
                     coords.append((img_idx, y0, y1, x0, x1))
-                    X_batch[len(coords) - 1] = img[y0:y1, x0:x1].reshape(self.config['input_shape'])
+                    X_batch[len(coords) - 1] = img[y0:y1,
+                                                   x0:x1].reshape(self.config['input_shape'])
 
         X_batch -= np.min(X_batch)
         X_batch /= np.max(X_batch)
@@ -228,26 +229,30 @@ class UNet():
         conv5 = Activation('relu')(conv5)
         conv5 = Dropout(0.5)(conv5)
 
-        up6 = merge([UpSampling2D(size=(2, 2))(conv5), conv4], mode='concat', concat_axis=3)
+        up6 = merge([UpSampling2D(size=(2, 2))(conv5), conv4],
+                    mode='concat', concat_axis=3)
         conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(up6)
         conv6 = Activation('relu')(conv6)
         conv6 = Convolution2D(256, 3, 3, border_mode='same', init='he_normal')(conv6)
         conv6 = Activation('relu')(conv6)
         conv6 = Dropout(0.5)(conv6)
 
-        up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3], mode='concat', concat_axis=3)
+        up7 = merge([UpSampling2D(size=(2, 2))(conv6), conv3],
+                    mode='concat', concat_axis=3)
         conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(up7)
         conv7 = Activation('relu')(conv7)
         conv7 = Convolution2D(128, 3, 3, border_mode='same', init='he_normal')(conv7)
         conv7 = Activation('relu')(conv7)
 
-        up8 = merge([UpSampling2D(size=(2, 2))(conv7), conv2], mode='concat', concat_axis=3)
+        up8 = merge([UpSampling2D(size=(2, 2))(conv7), conv2],
+                    mode='concat', concat_axis=3)
         conv8 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(up8)
         conv8 = Activation('relu')(conv8)
         conv8 = Convolution2D(64, 3, 3, border_mode='same', init='he_normal')(conv8)
         conv8 = Activation('relu')(conv8)
 
-        up9 = merge([UpSampling2D(size=(2, 2))(conv8), conv1], mode='concat', concat_axis=3)
+        up9 = merge([UpSampling2D(size=(2, 2))(conv8), conv1],
+                    mode='concat', concat_axis=3)
         conv9 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(up9)
         conv9 = Activation('relu')(conv9)
         conv9 = Convolution2D(32, 3, 3, border_mode='same', init='he_normal')(conv9)
@@ -264,7 +269,8 @@ class UNet():
 
         # TODO: consider not doing this... maybe it makes a difference in how the loss function works.
         # Slicing off the softmax probability of having a positive sample.
-        # This allows you to use the regular keras metrics and avoid all the np.argmax() calls.
+        # This allows you to use the regular keras metrics and avoid all the
+        # np.argmax() calls.
         def probability_positive(onehot):
             return onehot[:, :, :, 1]
         output = Lambda(probability_positive)(output)
@@ -276,7 +282,8 @@ class UNet():
             a = yt * K.log(yp + K.epsilon())
             b = (1 - yt) * K.log(1 + K.epsilon() - yp)
             m = 5
-            w = ((yt - 1) * -1) * (m - 1) + 1  # [0,1] -> [-1,0] -> [1,0] -> [m-1,0] -> [m,1]
+            # [0,1] -> [-1,0] -> [1,0] -> [m-1,0] -> [m,1]
+            w = ((yt - 1) * -1) * (m - 1) + 1
             return -1 * K.mean(w * (a + b))
             # Below return statement would match the keras binary_crossentropy value.
             # return -1. * K.mean((a + b))
@@ -299,8 +306,10 @@ class UNet():
                                  batch_size=self.config['batch_size'])
 
         cb = []
-        cb.append(ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, cooldown=3, min_lr=1e-6, verbose=1))
-        cb.append(EarlyStopping(monitor='val_loss', min_delta=1e-3, patience=15, verbose=1, mode='min'))
+        cb.append(ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                                    patience=5, cooldown=3, min_lr=1e-6, verbose=1))
+        cb.append(EarlyStopping(monitor='val_loss', min_delta=1e-3,
+                                patience=15, verbose=1, mode='min'))
         cb.append(ModelCheckpoint(self.checkpoint_name + '_val_loss.net',
                                   monitor='val_loss', save_best_only=True, verbose=1))
         cb.append(ModelCheckpoint(self.checkpoint_name + '_trn_loss.net',
@@ -396,15 +405,22 @@ def submit(args):
         logger.info('Loading model from %s.' % args['model'])
         model.load(args['model'])
 
+    # Get the checkpoint name before tweaking input shape, etc.
+    chkpt_name = model.checkpoint_name
+
+    model.config['input_shape'] = model.config[
+        'img_shape'] + model.config['input_shape'][-1:]
+    model.config['output_shape'] = model.config[
+        'img_shape'] + model.config['output_shape'][-1:]
+    model.config['output_shape_onehot'] = model.config[
+        'img_shape'] + model.config['output_shape_onehot'][-1:]
+
     model.compile()
     model.net.summary()
 
     if args['net']:
         logger.info('Loading saved weights from %s.' % args['net'])
         model.net.load_weights(args['net'])
-
-    logger.info('Loading training images...')
-    model.load_data()
 
     logger.info('Loading testing images...')
     img_stack = tiff.imread('data/test-volume.tif')
@@ -420,8 +436,8 @@ def submit(args):
     prd_stack = prd_stack.astype('float32')
 
     logger.info('Saving full size predictions...')
-    tiff.imsave(model.checkpoint_name + '.submission.tif', prd_stack)
-    logger.info('Done - saved file to %s.' % (model.checkpoint_name + '.submission.tif'))
+    tiff.imsave(chkpt_name + '.submission.tif', prd_stack)
+    logger.info('Done - saved file to %s.' % (chkpt_name + '.submission.tif'))
 
 
 def main():
