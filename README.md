@@ -2,6 +2,8 @@
 
 Image Segmentation Techniques on the ISBI 2012 dataset: http://brainiac2.mit.edu/isbi_challenge/
 
+All results are from src/models/unet_jocic.py implementation, which has an Argparse CLI that should be a good starting point.
+
 ## Results
 
 - 3/13/17
