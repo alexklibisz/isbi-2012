@@ -8,6 +8,7 @@ from keras.optimizers import Adam
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, EarlyStopping
 from skimage.transform import resize
 from time import time
+from os import path, mkdir
 import argparse
 import keras.backend as K
 import logging
